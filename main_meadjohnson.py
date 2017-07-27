@@ -16,9 +16,9 @@ if __name__ == '__main__':
         if not os.path.exists(filename):
             print('ErrorInfo:ocr的图片不存在！')
         else:
-            Tesseract_fix = ocr.ocr_tesseract(filename)
-            if Tesseract_fix:
-                print('SuccessInfo:%s' % Tesseract_fix)
+            tesseract_fix = ocr.ocr_tesseract(filename)
+            if tesseract_fix:
+                print('SuccessInfo:%s' % tesseract_fix)
             else:
                 print('ErrorInfo:未识别到出生编码！')
     except:

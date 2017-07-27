@@ -20,7 +20,7 @@ def ocr_tesseract(image):
         tesseract_ocr = tesseract_ocr + te.image_to_strings(fl_abs) + '&'
         os.remove(fl_abs)
     # Step3: 对结果进行修正
-    Tesseract_fix = ge.find_fix_no(tesseract_ocr)
-    return Tesseract_fix
+    tesseract_fix = ge.find_fix_no(tesseract_ocr)
+    return tesseract_fix
 
 
