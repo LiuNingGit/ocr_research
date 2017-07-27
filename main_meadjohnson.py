@@ -8,7 +8,6 @@ import src.ocr as ocr
 import os
 
 
-
 if __name__ == '__main__':
     try:
         filename = sys.argv[1]
