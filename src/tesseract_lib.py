@@ -66,6 +66,7 @@ def run_tesseract(input_filename, output_filename_base, lang=None, psm=None, oem
         command += ['--oem', oem]
 
     # command += ['digits']
+    # print(command)
     proc = subprocess.Popen(command, stderr=subprocess.PIPE)
     status = proc.wait()
     error_string = proc.stderr.read()

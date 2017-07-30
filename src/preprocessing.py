@@ -70,7 +70,8 @@ def split_image_hsv(filename):
             if not os.path.exists(path):
                 os.makedirs(path)
             for j_c in range(0, len(img_depoint_list)):
-                fn = r'%s\%s_split_%s_%s.jpg' % (path, os.path.splitext(os.path.basename(filename))[0], i_c, j_c)
+                split_name = r'%s_split_%s_%s.jpg' % (os.path.splitext(os.path.basename(filename))[0], i_c, j_c)
+                fn = os.path.join(path, split_name)
                 if os.path.exists(fn):
                     os.remove(fn)
                 cv2.imwrite(fn, img_depoint_list[j_c])

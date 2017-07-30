@@ -18,9 +18,11 @@ def ocr_tesseract(image):
     for fl in file_list:
         fl_abs = os.path.abspath(fl)
         tesseract_ocr = tesseract_ocr + te.image_to_strings(fl_abs) + '&'
+        # print(tesseract_ocr)
         os.remove(fl_abs)
     # Step3: 对结果进行修正
     tesseract_fix = ge.find_fix_no(tesseract_ocr)
-    return tesseract_fix
+    # print(tesseract_fix)
+    return tesseract_fix, tesseract_ocr
 
 
