@@ -8,37 +8,37 @@ import sys
 from datetime import datetime
 import src.ocr as ocr
 import src.log_manage as lm
+import src.img_template as it
 
 
 if __name__ == '__main__':
     logger = lm.get_logger()
     try:
         result_str = ''
-        filename = sys.argv[1]
+        #  filename = sys.argv[1]
         time_start = datetime.now()
-        # filename = r'C:\Users\liuning\PycharmProjects\DemoOCR\picture\255.png'
-        print('image path:%s' % filename)
+        filename = r'E:\GitHub\ocr_research\template\4_2.jpg'
+        # print('image path:%s' % filename)
         if not os.path.exists(filename):
             result_str = 'ocr_result:image not found '
         else:
-            tesseract_fix, tesseract_ocr = ocr.ocr_tesseract(filename)
-            if tesseract_fix:
-                result_str = 'ocr_result:%s ' % tesseract_fix
+            ocr_relsut = ocr.ocr_tesseract(filename, it.OcrTemplate)
+            if ocr_relsut is not None:
+                result_str = 'ocr_result:'
+                for recognition_result in ocr_relsut.recognition_region:
+                    result_str += '\n %s--%s \n' % (recognition_result.code, recognition_result.text)
             else:
                 result_str = 'ocr_result:failed '
         time_end = datetime.now()
         second = (time_end - time_start).seconds
-        result_str = result_str + (',total time:%ss' % second)
+        result_str = result_str + ('total time:%ss' % second)
         print(result_str)
-        print('-----------------------------------------------------------------------------------------------')
+        # print('-----------------------------------------------------------------------------------------------')
         log_str = 'Image path:%s, %s' % (filename, result_str)
-        log_str_1 = 'Original ocr result:%s' % tesseract_ocr
-        print(log_str_1)
-        logger.info(log_str_1)
         logger.info(log_str)
     except:
         e = sys.exc_info()
         logger.info(e)
-        print('ErrorInfo:%s' % e)
+        # print('ErrorInfo:%s' % e)
 
 

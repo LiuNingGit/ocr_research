@@ -6,81 +6,159 @@
 import cv2
 import numpy as np
 import os
-import copy
 from PIL import Image
 from src.globalvar import GlobalVar
+from src.img_template import OcrTemplate
+from matplotlib import pyplot as plt
+import src.img_template as it
 
-# 定义绿色空间
-LOWER_GREEN = np.array([45, 20, 23])   # 100张图片时效果比较好时的参数
-UPPER_GREEN = np.array([88, 255, 255])
 
-
-# 预处理图片
-def split_image_hsv(filename):
+# 图片预处理
+def img_preprocess(filename):
     img = cv2.imread(filename)
-    img_org = copy.deepcopy(img)
-    # 缩放图片
-    img, pro = zoom_image(img, 700)
-    # 转换成hsv空间
+    # 分离图片的噪声信息 和 核心信息
+    noise_img, core_img = separate_by_hsv(img, OcrTemplate.noise_hsv_space)
+    # 转换到空间
+    noise_img = cv2.cvtColor(noise_img, cv2.COLOR_HSV2BGR)
+    # 保存分离后的图片
+    file_name_split = os.path.splitext(os.path.basename(filename))[0]
+    noise_file_name = os.path.join(GlobalVar.get_temp_image_path(), file_name_split + '_noise.jpg')
+    core_file_name = os.path.join(GlobalVar.get_temp_image_path(), file_name_split + '_core.jpg')
+    save_img(noise_file_name, noise_img)
+    save_img(core_file_name, core_img)
+    return noise_file_name, core_file_name
+
+
+# 根据模板从原始图片中分割出要识别的区域
+def split_img(filename, template):
+    noise_file_name, core_file_name = img_preprocess(filename)
+    ocr_result = it.OcrResult(filename, template)
+    # 计算投影矩阵
+    img_core = cv2.imread(core_file_name, 0)
+    img_verify = cv2.imread(template.verify_region.verify_template_name, 0)
+    M, match_radio = img_match(img_verify, img_core, 0.3)
+    ocr_result.match_radio = match_radio
+    # 根据投影矩阵实现目标图片的变换提取
+    img = cv2.imread(filename, 0)
+    if M is not None:
+        extract_recognition_region(img_core, M, ocr_result)
+    else:
+        return None
+    return ocr_result
+
+
+# 提取待识别的区域，并按编码保存
+def extract_recognition_region(img, M, ocr_result):
+    # 计算每块识别区域的相对坐标
+    for recognition_rect, recognition_result in zip(OcrTemplate.recognition_region, ocr_result.recognition_region):
+        code = recognition_rect.code
+        x_r = recognition_rect.ul.x - OcrTemplate.verify_region.ul.x
+        y_r = recognition_rect.ul.y - OcrTemplate.verify_region.ul.y
+        w = recognition_rect.w
+        h = recognition_rect.h
+        img_rect = np.zeros((h, w, 3), np.uint8)
+        pts_orig = np.float32([[y, x] for x in range(h) for y in range(w)]).reshape(-1, 1, 2)
+        # 目标区域的坐标变换
+        # img_rect = np.zeros((OcrTemplate.verify_region.h, OcrTemplate.verify_region.w, 1), np.uint8)
+        # pts_orig = np.float32([[y, x] for x in range(OcrTemplate.verify_region.h) for y in range(OcrTemplate.verify_region.w)]).reshape(-1, 1, 2)
+        pts = pts_orig + [y_r, x_r]
+        dst = cv2.perspectiveTransform(pts, M)
+        for p, d in zip(np.int32(pts_orig), np.int32(dst)):
+            img_rect[p[0][1], p[0][0]] = img[d[0][1], d[0][0]]
+        # show_image(img_rect)
+        # 保存匹配到的区域图片
+        file_name_split = os.path.splitext(os.path.basename(ocr_result.file_name))[0]
+        img_name = os.path.join(GlobalVar.get_temp_image_path(), file_name_split + '_' + code + '.jpg')
+        save_img(img_name, img_rect)
+        raise_dpi(img_name)
+        recognition_result.img_name = img_name
+    # 保存截取后的图片
+
+
+# 通过图像匹配检测目标图像中是否含有校验模板，并返回仿射矩阵
+def img_match(query_img, train_img, min_match_radio=0.6):
+    # 生成图片的sift描述符
+    sift = cv2.xfeatures2d.SIFT_create()
+    kp1, des1 = sift.detectAndCompute(query_img, None)
+    kp2, des2 = sift.detectAndCompute(train_img, None)
+
+    # 比对两张图片特征，找到匹配的描述符
+    flann_index_kdtree = 0
+    index_params = dict(algorithm=flann_index_kdtree, trees=5)
+    search_params = dict(checks=50)
+    flann = cv2.FlannBasedMatcher(index_params, search_params)
+    matches = flann.match(des1, des2)
+    min_dist = min(x.distance for x in matches)
+    th_dist = max(min_dist * 2.0, 60.0)
+
+    # 筛选匹配符距离比较小的描述符
+    good = []
+    for m in matches:
+        if m.distance < th_dist:
+            good.append(m)
+
+    # 计算放射矩阵及其误差匹配
+    if len(good) > min_match_radio * len(kp1):
+        # 获取关键点的坐标
+        src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+        dst_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+        M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+        matches_mask = mask.ravel().tolist()
+        match_radio = matches_mask.count(1) / len(kp1)
+        # 通过画图可视化匹配结果
+        # draw_params = dict(matchColor=(0, 255, 0),
+        #                    singlePointColor=None,
+        #                    matchesMask=matches_mask,
+        #                    flags=2)
+        # img3 = cv2.drawMatches(query_img, kp1, train_img, kp2, good, None, **draw_params)
+        # plt.imshow(img3, 'gray')
+        # plt.show()
+        # 返回结果
+        if match_radio > min_match_radio:
+            return M, match_radio
+        else:
+            return None, 0
+    else:
+        return None, 0
+
+
+# 按颜色分离图片
+def separate_by_hsv(img, hsv_space):
+    # 转换到hsv空间
     img_hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    lg = LOWER_GREEN
-    ug = UPPER_GREEN
-    # 根据绿色空间过滤图片
-    img_hsv_mask = mask_image(img_hsv, lg, ug)
-    # 灰度化
-    img_mask_bgr = cv2.cvtColor(img_hsv_mask, cv2.COLOR_HSV2BGR)
-    img_mask_gray = cv2.cvtColor(img_mask_bgr, cv2.COLOR_BGR2GRAY)
-    # 二值化
-    # plt.hist(img_mask_gray)
-    # img_mask_gray_thresh = np.where(img_mask_gray > 20, 253, 0)
-    ret, img_mask_gray_thresh = cv2.threshold(img_mask_gray, 30, 255, cv2.THRESH_BINARY_INV)
-    img_mask_gray_thresh_fill = fill_hollow(img_mask_gray_thresh, 4)
-    # 将边缘全部设置为白色
-    img_mask_gray_border = white_border(img_mask_gray_thresh_fill, 5)
-    # 识别轮廓
-    image, contours, hierarchy = cv2.findContours(img_mask_gray_border, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    is_first = True
+    for space in hsv_space:
+        if is_first:
+            mask = cv2.inRange(img_hsv, space.lower, space.upper)
+            is_first = False
+        else:
+            mask |= cv2.inRange(img_hsv, space.lower, space.upper)
+    img_mask = cv2.bitwise_and(img, img, mask=mask)
+    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    # img_blur = cv2.GaussianBlur(img_gray, (5, 5), 0)
+    img_binary = cv2.adaptiveThreshold(img_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 10)
+    res = cv2.bitwise_or(img_binary, mask)
+    return img_mask, res
 
-    # 循环处理轮廓
-    i_c = 0
-    file_list = []
-    for cnt in contours:
-        cnt_area = cv2.contourArea(cnt)
-        h_org, w_org, r_org = img_org.shape
-        org_area = h_org * w_org
-        # 绘制轮廓
-        # img_cnt = cv2.drawContours(img_org, cnt, -1, (0, 0, 255), 3)  # Draw contours
-        # show_image(img_cnt)
-        if org_area / 10 > cnt_area > 256:
-            # 根据轮廓截取图片，并增强后保存
-            ((x_m, y_m), (w_m, h_m), th_m) = cv2.minAreaRect(cnt)
-            w_m_p = w_m / pro
-            h_m_p = h_m / pro
-            if max(w_m, h_m) / min(w_m, h_m) > 3.2 or max(w_m, h_m) / min(w_m, h_m) < 2.3 or max(w_m, h_m) > 200 or min(w_m_p, h_m_p) < 35:
-                # print('舍弃的矩形长:%s 宽:%s' % (max(w_m, h_m), min(w_m, h_m)))
-                continue
-            x, y, w, h = cv2.boundingRect(cnt)
-            x_p = int(x / pro); y_p = int(y / pro); w_p = int(w / pro); h_p = int(h / pro);
-            img_cut = copy.deepcopy(img_org[y_p:(y_p + h_p), x_p:(x_p + w_p)])
-            # 通过g,r_g分布二值化图片
-            img_depoint_list = thresh_otsu(img_cut)
-            # 保存原始图片
-            # img_depoint_list.append(img_cut)
 
-            path = GlobalVar.get_temp_image_path()
-            if not os.path.exists(path):
-                os.makedirs(path)
-            for j_c in range(0, len(img_depoint_list)):
-                split_name = r'%s_split_%s_%s.jpg' % (os.path.splitext(os.path.basename(filename))[0], i_c, j_c)
-                fn = os.path.join(path, split_name)
-                if os.path.exists(fn):
-                    os.remove(fn)
-                cv2.imwrite(fn, img_depoint_list[j_c])
-                if os.path.exists(fn):
-                    raise_dpi(fn)
-                file_list.append(fn)
-                j_c += 1
-            i_c += 1
-    return file_list
+# 显示图片
+def show_image(img):
+    res, pro = zoom_image(img, 800)
+    cv2.imshow('image', res)
+    k = cv2.waitKey(0) & 0xFF
+    if k == 27:
+        cv2.destroyAllWindows()
+    elif k == ord('s'):
+        cv2.imwrite('messigray.png', img)
+        cv2.destroyAllWindows()
+
+
+# 增加图片dpi
+def raise_dpi(filename, dpi=600):
+    img = Image.open(filename)
+    # dpi = img.info["dpi"]
+    # img.info["dpi"] = dpi * k
+    img.save(filename, dpi=(dpi, dpi))
 
 
 # 缩放图片，并返回缩放系数
@@ -90,106 +168,26 @@ def zoom_image(img, target):
     pro = 1.0
     if real > target * 1.2:
         pro = float(target) / float(real)
-        img = cv2.resize(img, None, fx=pro, fy=pro, interpolation=cv2.INTER_AREA)
-    return img, pro
-
-
-# 根据hsv范围过滤图片
-def mask_image(img, lower, upper):
-    mask = cv2.inRange(img, lower, upper)
-    img_mask = cv2.bitwise_and(img, img, mask=mask)
-    return img_mask
-
-
-# 填充二值化图片里的空洞
-def fill_hollow(img_bin, k):
-    img_bin_copy = img_bin.copy()
-    w, h = img_bin.shape[:2]
-    th = (2 * k + 1) * (2 * k + 1) * 175
-    # 边缘点不进行填充
-    for y in range(1, h - 2):
-        for x in range(1, w - 2):
-            if x == 0 or y == 0 or x == w - 1 or y == h - 1:
-                continue
-            x_min = (x - k) if x - k > 0 else 0
-            x_max = (x + k) if x + k < w - 1 else (w - 1)
-            y_min = (y - k) if y - k > 0 else 0
-            y_max = (y + k) if y + k < h - 1 else (h - 1)
-            bin_sum = np.sum(img_bin_copy[x_min: x_max, y_min: y_max])
-            if bin_sum < th:
-                img_bin[x, y] = 0
-            else:
-                img_bin[x, y] = 255
-    return img_bin
-
-
-# 设置图片边缘为白色
-def white_border(img, k):
-    w, h = img.shape[:2]
-    img[0:k, :] = 255
-    img[:, 0:k] = 255
-    img[w-k-1:w, :] = 255
-    img[:, h-k-1:h] = 255
-    return img
-
-
-# 自适应阀值对图片进行二值化
-def thresh_otsu(img):
-    img_org = copy.deepcopy(img)
-    g = copy.deepcopy(img[:, :, 1]).astype(np.int32)
-    r = copy.deepcopy(img[:, :, 2]).astype(np.int32)
-    b = copy.deepcopy(img[:, :, 0]).astype(np.int32)
-    gray = (r * 30 + g * 59 + b * 11)/100
-    r_g = r - g
-    mean_gray = np.mean(gray)
-    median_gray = np.median(gray)
-    std_gray = np.std(gray)
-    mean_r_g = np.mean(r_g)
-    median_r_g = np.median(r_g)
-    std_r_g = np.std(r_g)
-    mean_g = np.mean(g)
-    std_g = np.std(g)
-    img_list = []
-    for i in range(1, 10, 2):
-        for j in range(1, 10, 2):
-            for k in range(1, 10, 2):
-                th_g = mean_g - std_g * (i + 5) / 10
-                th_gray = mean_gray - std_gray * j / 10
-                th_r_g = mean_r_g - std_r_g * k / 10
-                # print('th_g %s-----' % th_g, 'th_r_g %s-----' % th_r_g)
-                img_temp = copy.deepcopy(img_org)
-                image_binary(img_temp, th_g, th_r_g, th_gray)
-                # img_temp_enlarge = enlarge(img_temp)
-                img_temp_enlarge_blur = cv2.bilateralFilter(img_temp, 5, 75, 25)
-                img_list.append(img_temp_enlarge_blur)
-    return img_list
-
-
-# 二值化图片
-def image_binary(img, th_g, th_r_g, th_gray):
-    img_mask = copy.deepcopy(img).astype('float')
-    g, r, b =img_mask[:, :, 1], img_mask[:, :, 2], img_mask[:, :, 0]
-    r_g = r - g
-    gray = img_mask[:, :, 2] * 0.3 + img_mask[:, :, 1] * 0.59 + img_mask[:, :, 0] * 0.11
-    black = (g < th_g) & (r_g >= th_r_g) & (gray < th_gray)
-    white = ~ black
-    img[black] = (0, 0, 0)
-    img[white] = (255, 255, 255)
-
-
-# 放大图片
-def enlarge(img):
-    h, w = img.shape[:2]
-    if w * 3 < 900 and h * 3 < 600:
-        img_enlarge = cv2.resize(img, (w * 3, h * 3))
-        return img_enlarge
+        res = cv2.resize(img, None, fx=pro, fy=pro, interpolation=cv2.INTER_AREA)
     else:
-        return img
+        res = img
+    return res, pro
 
 
-# 增加图片dpi
-def raise_dpi(filename, dpi=600):
-    img = Image.open(filename)
-    # dpi = img.info["dpi"]
-    # img.info["dpi"] = dpi * k
-    img.save(filename, dpi=(dpi, dpi))
+# 保存图片
+def save_img(img_name, img):
+    img_path = os.path.dirname(img_name)
+    if not os.path.exists(img_path):
+        os.makedirs(img_path)
+    if os.path.exists(img_name):
+        os.remove(img_name)
+    cv2.imwrite(img_name, img)
+
+
+if __name__ == '__main__':
+    filename = r'E:\GitHub\ocr_research\template\4_2.jpg'
+    noise_file_name, core_file_name = img_preprocess(filename)
+    is_pass = img_split(core_file_name)
+    print(is_pass)
+
+
